@@ -305,7 +305,6 @@ async function run() {
   let skillsOffset = 0;
   while (true) {
     const { data: batch } = await main.from('skills').select('id, name, slug, category')
-      .not('category', 'is', null)
       .neq('category', 'remove')
       .range(skillsOffset, skillsOffset + 999);
     if (!batch || batch.length === 0) break;
