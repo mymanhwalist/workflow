@@ -1,11 +1,4 @@
-name: 2 — Refine & Publish Jobs
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Runs 30 minutes after the scraper (workflow 1) every 6 hours.
-# Promotes fresh pending jobs (posted_date within 48h) to Main DB.
-# Uses Groq LLM (llama-4-scout) to extract skills, category, location, etc.
-# Jobs are never automatically removed — publish only.
-# ─────────────────────────────────────────────────────────────────────────────
+name: process
 
 on:
   schedule:
@@ -17,41 +10,38 @@ on:
   workflow_dispatch:
     inputs:
       max_per_company:
-        description: 'Max jobs promoted per company (default: 3)'
+        description: 'Max jobs per source'
         required: false
         default: '3'
       limit:
-        description: 'Max total jobs to promote per run (default: 6)'
+        description: 'Max total jobs per run'
         required: false
         default: '6'
       dry_run:
-        description: 'Dry run — print only, no DB writes'
+        description: 'Dry run'
         required: false
         default: 'false'
         type: boolean
 
 jobs:
-  refine:
-    name: DB2 raw_jobs → Main DB
+  run:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: 'npm'
           cache-dependency-path: apifromurl/package-lock.json
 
-      - name: Install dependencies
+      - name: Install
         working-directory: apifromurl
         run: npm ci
 
-      - name: Run refiner
+      - name: Run
         working-directory: apifromurl
         env:
           DB2_URL: ${{ secrets.DB2_URL }}
@@ -60,7 +50,7 @@ jobs:
           MAIN_DB_KEY: ${{ secrets.MAIN_DB_KEY }}
           DB1_URL: ${{ secrets.DB1_URL }}
           DB1_KEY: ${{ secrets.DB1_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          AI_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           MAX_CO="${{ github.event.inputs.max_per_company }}"
           if [ -z "$MAX_CO" ]; then MAX_CO="3"; fi
@@ -70,9 +60,4 @@ jobs:
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
-          echo "Running: node refiner-groq.js $ARGS"
-          node refiner-groq.js $ARGS
-
-      - name: Summary
-        if: always()
-        run: echo "✅ Refine finished at $(date -u)"
+          node processor.js $ARGS

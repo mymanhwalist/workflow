@@ -1,33 +1,15 @@
-/**
- * scraper.js — New DB2 API Scraper
- *
- * Reads:  career_page_configs WHERE source_type='api' AND is_verified=true
- * Writes: raw_jobs (dedup + queue + history)
- * Logs:   scrape_runs (audit + first-scrape detection)
- *
- * Usage:
- *   node scraper.js               → scrape all due API configs
- *   node scraper.js --dry-run     → print only, no writes
- *   node scraper.js --limit=10    → only first N configs
- *   node scraper.js --force       → ignore last_scraped_at cooldown
- */
-
 import { createClient } from '@supabase/supabase-js';
 
-// ─── CONFIG ──────────────────────────────────────────────────────────────────
-
-const DB2_URL = process.env.DB2_URL || 'https://buowaosqezcvdpdjcewq.supabase.co';
+const DB2_URL = process.env.DB2_URL;
 const DB2_KEY = process.env.DB2_KEY;
 
-const SCRAPE_COOLDOWN_HOURS = 6;     // skip configs scraped within this window
-const MAX_FAILURES           = 3;    // disable config after this many consecutive failures
-const REQUEST_DELAY_MS       = 300;  // polite delay between requests
-
-// ─── ARGS ─────────────────────────────────────────────────────────────────────
+const SCRAPE_COOLDOWN_HOURS = 6;     
+const MAX_FAILURES           = 3;    
+const REQUEST_DELAY_MS       = 300;  
 
 const DRY_RUN      = process.argv.includes('--dry-run');
 const FORCE        = process.argv.includes('--force');
-const RANDOM_JOBS  = process.argv.includes('--random');        // shuffle before --max-jobs slice
+const RANDOM_JOBS  = process.argv.includes('--random');        
 const limitArg     = process.argv.find(a => a.startsWith('--limit='));
 const LIMIT        = limitArg ? parseInt(limitArg.split('=')[1]) : null;
 const provArg      = process.argv.find(a => a.startsWith('--provider='));
@@ -35,27 +17,24 @@ const PROVIDER     = provArg ? provArg.split('=')[1] : null;
 const maxJobsArg   = process.argv.find(a => a.startsWith('--max-jobs='));
 const MAX_JOBS     = maxJobsArg ? parseInt(maxJobsArg.split('=')[1]) : null;
 const companiesArg = process.argv.find(a => a.startsWith('--companies='));
-// Comma-separated company slugs, e.g. --companies=dropbox,gitlab,figma
+
 const TARGET_SLUGS = companiesArg ? companiesArg.split('=')[1].split(',').map(s => s.trim()).filter(Boolean) : null;
 const minNewArg    = process.argv.find(a => a.startsWith('--min-new-jobs='));
 const MIN_NEW_JOBS = minNewArg ? parseInt(minNewArg.split('=')[1]) : null;
 const minCoArg     = process.argv.find(a => a.startsWith('--min-companies='));
-// Stop after this many different companies have contributed at least 1 new pending job
+
 const MIN_COMPANIES = minCoArg ? parseInt(minCoArg.split('=')[1]) : null;
 const maxPerCoArg  = process.argv.find(a => a.startsWith('--max-pending-per-company='));
-// Cap new pending jobs saved per company (prevents one big company flooding the queue)
+
 const MAX_PENDING_PER_COMPANY = maxPerCoArg ? parseInt(maxPerCoArg.split('=')[1]) : null;
-// Only scrape providers whose API returns a trustworthy posting date
+
 const RELIABLE_DATES_ONLY = process.argv.includes('--reliable-dates-only');
 const RELIABLE_DATE_PROVIDERS = ['Greenhouse', 'Lever', 'Ashby', 'Workable', 'Eightfold', 'Recruitee', 'BambooHR', 'Personio'];
 
-const db2 = createClient(DB2_URL, DB2_KEY);
-
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
+const db = createClient(DB2_URL, DB2_KEY);
 
 async function main() {
   console.log('══════════════════════════════════════════');
-  console.log('DB2 API SCRAPER');
   if (DRY_RUN)       console.log('DRY RUN — no writes');
   if (MAX_JOBS)      console.log(`MAX JOBS — ${MAX_JOBS} job(s) per config${RANDOM_JOBS ? ' (random)' : ''}`);
   if (FORCE)         console.log('FORCE — ignoring cooldown');
@@ -66,10 +45,9 @@ async function main() {
   if (RELIABLE_DATES_ONLY) console.log(`RELIABLE DATES ONLY — ${RELIABLE_DATE_PROVIDERS.join(', ')}`);
   console.log('══════════════════════════════════════════\n');
 
-  // Resolve target company slugs → IDs (if --companies= was passed)
   let targetCompanyIds = null;
   if (TARGET_SLUGS) {
-    const { data: targetCos } = await db2.from('companies').select('id, slug').in('slug', TARGET_SLUGS);
+    const { data: targetCos } = await db.from('companies').select('id, slug').in('slug', TARGET_SLUGS);
     targetCompanyIds = (targetCos || []).map(c => c.id);
     if (targetCompanyIds.length === 0) {
       console.error(`No companies found for slugs: ${TARGET_SLUGS.join(', ')}`);
@@ -78,9 +56,8 @@ async function main() {
     console.log(`Resolved ${targetCompanyIds.length}/${TARGET_SLUGS.length} company slugs to IDs\n`);
   }
 
-  // Load configs
   const threshold = new Date(Date.now() - SCRAPE_COOLDOWN_HOURS * 3600000).toISOString();
-  let q = db2.from('career_page_configs')
+  let q = db.from('career_page_configs')
     .select('id, company_id, ats_provider, source_type, api_endpoint, api_endpoint_detail, career_page_url, discovered_from')
     .eq('source_type', 'api')
     .eq('is_verified', true);
@@ -88,7 +65,7 @@ async function main() {
   if (!FORCE) q = q.or(`last_scraped_at.is.null,last_scraped_at.lt.${threshold}`);
   if (PROVIDER) q = q.eq('ats_provider', PROVIDER);
   if (RELIABLE_DATES_ONLY) q = q.in('ats_provider', RELIABLE_DATE_PROVIDERS);
-  // --min-new-jobs: ignore --companies filter, scrape ALL verified configs stalest-first
+
   if (!MIN_NEW_JOBS && targetCompanyIds) q = q.in('company_id', targetCompanyIds);
 
   const { data: configs, error } = await q.order('last_scraped_at', { ascending: true, nullsFirst: true });
@@ -97,16 +74,12 @@ async function main() {
   const toScrape = LIMIT ? configs.slice(0, LIMIT) : configs;
   console.log(`Configs to scrape: ${toScrape.length} (of ${configs.length} due)\n`);
 
-  // Track which companies have been scraped before (for first-scrape detection).
-  // Check raw_jobs (not just scrape_runs) so companies scraped by the old scraper
-  // are correctly treated as non-first-scrape and their new jobs go to pending.
-  const { data: priorRuns }  = await db2.from('scrape_runs').select('company_id').eq('status', 'success');
-  const { data: rawJobCos }  = await db2.from('raw_jobs').select('company_id').limit(300000);
+  const { data: priorRuns }  = await db.from('scrape_runs').select('company_id').eq('status', 'success');
+  const { data: rawJobCos }  = await db.from('raw_jobs').select('company_id').limit(300000);
   const scrapedCompanies = new Set([
     ...(priorRuns  || []).map(r => r.company_id),
     ...(rawJobCos  || []).map(r => r.company_id),
   ]);
-  console.log(`Companies with existing raw_jobs: ${scrapedCompanies.size}\n`);
 
   const totals = { configs: 0, jobs_found: 0, jobs_new: 0, jobs_updated: 0, errors: 0 };
 
@@ -123,7 +96,7 @@ async function main() {
     try {
       let jobs = await fetchJobs(config);
       if (MAX_JOBS) {
-        // Shuffle first so we get a random selection, not just the first N
+
         if (RANDOM_JOBS) {
           for (let j = jobs.length - 1; j > 0; j--) {
             const k = Math.floor(Math.random() * (j + 1));
@@ -132,8 +105,7 @@ async function main() {
         }
         jobs = jobs.slice(0, MAX_JOBS);
       }
-      // Cap first-scrape companies at 100 jobs — no point storing thousands of
-      // skipped_first_scrape entries; we'll catch the rest on the second scrape
+
       if (isFirstScrape && jobs.length > 100) {
         jobs = jobs.slice(0, 100);
       }
@@ -145,7 +117,7 @@ async function main() {
       if (!DRY_RUN) {
         let jobsPending = 0;
         for (const job of jobs) {
-          // Stop inserting new pending jobs for this company once cap is reached
+
           if (MAX_PENDING_PER_COMPANY && jobsPending >= MAX_PENDING_PER_COMPANY && !isFirstScrape) {
             const result = await upsertRawJob(job, config, isFirstScrape, true);
             if (result === 'updated') jobsUpdated++;
@@ -161,11 +133,9 @@ async function main() {
         if (jobsPending > 0) totals.companies_with_new = (totals.companies_with_new || 0) + 1;
         console.log(`  → new: ${jobsNew}  updated: ${jobsUpdated}${jobsPending ? `  pending: ${jobsPending}` : ''}`);
 
-        // Mark this company as scraped
         scrapedCompanies.add(config.company_id);
 
-        // Update config
-        await db2.from('career_page_configs').update({
+        await db.from('career_page_configs').update({
           last_scraped_at: new Date().toISOString(),
           consecutive_failures: 0,
           last_error: null,
@@ -180,11 +150,11 @@ async function main() {
       console.log(`  ❌ ${err.message}`);
 
       if (!DRY_RUN) {
-        // Increment consecutive failures, disable after MAX_FAILURES
-        const { data: cur } = await db2.from('career_page_configs')
+
+        const { data: cur } = await db.from('career_page_configs')
           .select('consecutive_failures').eq('id', config.id).single();
         const newFailures = (cur?.consecutive_failures || 0) + 1;
-        await db2.from('career_page_configs').update({
+        await db.from('career_page_configs').update({
           consecutive_failures: newFailures,
           is_verified: newFailures >= MAX_FAILURES ? false : true,
           last_error: err.message,
@@ -196,9 +166,8 @@ async function main() {
       }
     }
 
-    // Log to scrape_runs
     if (!DRY_RUN) {
-      await db2.from('scrape_runs').insert({
+      await db.from('scrape_runs').insert({
         company_id:   config.company_id,
         config_id:    config.id,
         is_first_scrape: isFirstScrape,
@@ -214,7 +183,6 @@ async function main() {
 
     totals.configs++;
 
-    // Stop early once enough companies have contributed new pending jobs
     if (MIN_COMPANIES && (totals.companies_with_new || 0) >= MIN_COMPANIES) {
       console.log(`\n✅ ${totals.companies_with_new} companies contributed new jobs — stopping early.`);
       break;
@@ -227,7 +195,6 @@ async function main() {
     await sleep(REQUEST_DELAY_MS);
   }
 
-  // Summary
   console.log('\n══════════════════════════════════════════');
   console.log('DONE');
   console.log(`Configs scraped:  ${totals.configs}`);
@@ -237,14 +204,11 @@ async function main() {
   console.log(`Errors:           ${totals.errors}`);
 
   if (!DRY_RUN) {
-    const { count: pending } = await db2.from('raw_jobs').select('*', { count: 'exact', head: true }).eq('status', 'pending');
-    const { count: total }   = await db2.from('raw_jobs').select('*', { count: 'exact', head: true });
-    console.log(`\nraw_jobs total:   ${total}`);
+    const { count: pending } = await db.from('raw_jobs').select('*', { count: 'exact', head: true }).eq('status', 'pending');
+    const { count: total }   = await db.from('raw_jobs').select('*', { count: 'exact', head: true });
     console.log(`status=pending:   ${pending}`);
   }
 }
-
-// ─── FETCH JOBS ───────────────────────────────────────────────────────────────
 
 async function fetchJobs(config) {
   const { ats_provider, api_endpoint } = config;
@@ -303,7 +267,7 @@ async function fetchWorkable(config) {
 
 async function fetchEightfold(config) {
   const jobs = [];
-  const PAGE_SIZE = 10; // Eightfold caps at 10 per request
+  const PAGE_SIZE = 10; 
   let start = 0;
   let total = null;
 
@@ -374,7 +338,7 @@ function parsePersonioXML(xml, config) {
     const title = get('name');
     const url   = get('url');
     if (!title || !url) continue;
-    // Extract all <value> blocks from jobDescriptions
+
     let description = null;
     const descBlock = block.match(/<jobDescriptions>([\s\S]*?)<\/jobDescriptions>/);
     if (descBlock) {
@@ -407,8 +371,6 @@ function parsePersonioXML(xml, config) {
   }
   return jobs;
 }
-
-// ─── NORMALIZE ────────────────────────────────────────────────────────────────
 
 function normalizeResponse(data, config) {
   let raw = [];
@@ -553,40 +515,35 @@ function parseJobviteHTML(html, config) {
   return jobs;
 }
 
-// ─── UPSERT RAW JOB ──────────────────────────────────────────────────────────
-
 async function upsertRawJob(job, config, isFirstScrape, skipIfNew = false) {
   try {
-    // Check if already exists
-    const { data: existing } = await db2.from('raw_jobs')
+
+    const { data: existing } = await db.from('raw_jobs')
       .select('id, seen_count')
       .eq('application_url', job.application_url)
       .maybeSingle();
 
     if (existing) {
-      // Already seen — update last_seen_at + increment seen_count
-      await db2.from('raw_jobs').update({
+
+      await db.from('raw_jobs').update({
         last_seen_at: new Date().toISOString(),
         seen_count: existing.seen_count + 1
       }).eq('id', existing.id);
       return 'updated';
     }
 
-    // Per-company cap reached — just update last_seen_at without inserting
     if (skipIfNew) return 'updated';
 
-    // New job — fetch detail API for providers that don't include description in list API
     const detailData = await fetchJobDetail(job, config);
     if (detailData) {
       job.description = detailData.description || job.description || null;
       job.raw_data    = { ...job.raw_data, ...detailData.extra };
     }
 
-    // New job — if first scrape but ATS gives a posted_date within 24h, treat as pending
     const CUTOFF_24H = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const isRecentlyPosted = job.posted_date && job.posted_date >= CUTOFF_24H;
     const status = (isFirstScrape && !isRecentlyPosted) ? 'skipped_first_scrape' : 'pending';
-    const { error } = await db2.from('raw_jobs').insert({
+    const { error } = await db.from('raw_jobs').insert({
       company_id:      config.company_id,
       config_id:       config.id,
       title:           job.title,
@@ -601,7 +558,7 @@ async function upsertRawJob(job, config, isFirstScrape, skipIfNew = false) {
     });
 
     if (error) {
-      if (error.code === '23505') return 'updated'; // race condition dupe
+      if (error.code === '23505') return 'updated'; 
       throw error;
     }
     return 'new';
@@ -611,14 +568,11 @@ async function upsertRawJob(job, config, isFirstScrape, skipIfNew = false) {
   }
 }
 
-// ─── FETCH JOB DETAIL ─────────────────────────────────────────────────────────
-// Only called for NEW jobs from providers that don't include description in list API
-
 async function fetchJobDetail(job, config) {
   const ats = config.ats_provider;
 
   try {
-    // Greenhouse: boards-api.greenhouse.io/v1/boards/{board}/jobs/{id}
+
     if (ats === 'Greenhouse') {
       const match = job.application_url.match(/greenhouse\.io\/([^\/]+)\/jobs\/(\d+)/);
       if (!match) return null;
@@ -639,7 +593,6 @@ async function fetchJobDetail(job, config) {
       };
     }
 
-    // SmartRecruiters: api.smartrecruiters.com/v1/companies/{company}/postings/{id}
     if (ats === 'SmartRecruiters') {
       const companyId = job.raw_data?.company?.identifier;
       if (!companyId || !job.external_id) return null;
@@ -665,7 +618,6 @@ async function fetchJobDetail(job, config) {
       };
     }
 
-    // BambooHR: {slug}.bamboohr.com/careers/{id} — scrape description from HTML
     if (ats === 'BambooHR') {
       const slugMatch = config.api_endpoint.match(/https?:\/\/([^.]+)\.bamboohr\.com/);
       if (!slugMatch || !job.external_id) return null;
@@ -676,7 +628,7 @@ async function fetchJobDetail(job, config) {
       });
       if (!res.ok) return null;
       const html = await res.text();
-      // BambooHR embeds job data as JSON in a <script> tag
+
       const jsonMatch = html.match(/<script[^>]*type="application\/json"[^>]*>([\s\S]*?)<\/script>/);
       if (jsonMatch) {
         try {
@@ -685,13 +637,12 @@ async function fetchJobDetail(job, config) {
           if (desc) return { description: desc, extra: {} };
         } catch {}
       }
-      // Fallback: extract from BambooRich div
+
       const richMatch = html.match(/<div[^>]*class="[^"]*BambooRich[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
       if (richMatch) return { description: richMatch[1].trim(), extra: {} };
       return null;
     }
 
-    // Breezy HR: {company}.breezy.hr/json/{id}
     if (ats === 'Breezy HR') {
       const match = config.api_endpoint.match(/https:\/\/([^.]+)\.breezy\.hr/);
       if (!match || !job.external_id) return null;
@@ -713,14 +664,12 @@ async function fetchJobDetail(job, config) {
     }
 
   } catch {
-    // Detail fetch failed — not critical, continue without description
+
     return null;
   }
 
   return null;
 }
-
-// ─── UTILS ───────────────────────────────────────────────────────────────────
 
 const STRIP_PARAMS = new Set(['utm_source','utm_medium','utm_campaign','utm_content','utm_term','ref','source','gh_src','lever-source','lever-origin']);
 

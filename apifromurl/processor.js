@@ -1,57 +1,33 @@
-/**
- * refiner-groq.js — Groq-powered job refiner
- *
- * Replaces rule-based extraction with llama-4-scout via Groq API:
- *   - job_type, commitment_type, experience_level, category
- *   - Skills: no cap, open vocabulary, normalised against skills table
- *   - requirements_summary (existing schema column, was never populated)
- *   - responsibilities (new column — run: ALTER TABLE jobs ADD COLUMN responsibilities TEXT)
- *
- * Falls back to rule-based if Groq call fails.
- *
- * Usage:
- *   node refiner-groq.js --dry-run            → print output, no DB writes
- *   node refiner-groq.js                      → process all pending jobs
- *   node refiner-groq.js --limit=20           → first N jobs only
- *   node refiner-groq.js --max-per-company=3  → allow more jobs per company
- */
-
 import { createClient } from '@supabase/supabase-js';
-import Groq from 'groq-sdk';
+import AI from 'groq-sdk';
 import { US_CITY_STATE } from './us-city-state.js';
 
-// ─── CONFIG ───────────────────────────────────────────────────────────────────
-
-const DB2_URL      = process.env.DB2_URL      || 'https://buowaosqezcvdpdjcewq.supabase.co';
+const DB2_URL      = process.env.DB2_URL     ;
 const DB2_KEY      = process.env.DB2_KEY     ;
-const MAIN_URL     = process.env.MAIN_DB_URL  || 'https://osoilvzyyjmrbjsiyrgs.supabase.co';
+const MAIN_URL     = process.env.MAIN_DB_URL ;
 const MAIN_KEY     = process.env.MAIN_DB_KEY ;
-const DB1_URL      = process.env.DB1_URL      || 'https://bojsbsoqpnuzikyzpjlh.supabase.co';
+const DB1_URL      = process.env.DB1_URL     ;
 const DB1_KEY      = process.env.DB1_KEY     ;
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const AI_KEY = process.env.AI_KEY;
 
-const GROQ_MODEL      = 'meta-llama/llama-4-scout-17b-16e-instruct';
-const GROQ_BATCH_SIZE = 10;
-const DESC_TRUNCATE   = 1500;  // chars of clean text — captures requirements in most postings
+const AI_MODEL = process.env.AI_MODEL || 'default';
+const BATCH_SIZE = 10;
+const DESC_TRUNCATE   = 1500;  
 const FETCH_BATCH     = 200;
 const CUTOFF_48H      = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
-
-// ─── ARGS ─────────────────────────────────────────────────────────────────────
 
 const DRY_RUN         = process.argv.includes('--dry-run');
 const limitArg        = process.argv.find(a => a.startsWith('--limit='));
 const LIMIT           = limitArg ? parseInt(limitArg.split('=')[1]) : null;
 const maxPerCoArg     = process.argv.find(a => a.startsWith('--max-per-company='));
 const MAX_PER_COMPANY = maxPerCoArg ? parseInt(maxPerCoArg.split('=')[1]) : 1;
-const FROM_PROMOTED   = process.argv.includes('--from-promoted');   // test mode: use promoted jobs
-const SKIP_FRESHNESS  = process.argv.includes('--skip-freshness');  // test mode: skip 48h filter
+const FROM_PROMOTED   = process.argv.includes('--from-promoted');   
+const SKIP_FRESHNESS  = process.argv.includes('--skip-freshness');  
 
-const db2  = createClient(DB2_URL,  DB2_KEY);
+const db  = createClient(DB2_URL,  DB2_KEY);
 const main = createClient(MAIN_URL, MAIN_KEY);
 const db1  = createClient(DB1_URL,  DB1_KEY);
-const groq = new Groq({ apiKey: GROQ_API_KEY });
-
-// ─── GROQ EXTRACTION ──────────────────────────────────────────────────────────
+const ai = new AI({ apiKey: AI_KEY });
 
 const SYSTEM_PROMPT = `You are a job posting data extractor. Return ONLY a valid JSON object. No explanation, no markdown, no extra text.`;
 
@@ -68,12 +44,12 @@ function cleanDesc(html) {
 function smartTruncate(text, maxChars) {
   if (text.length <= maxChars) return text;
   const markers = [
-    // English
+
     /\b(requirements?|qualifications?|what (you|we) (need|require|are looking for)|must.have|you (should|will) have|about you|what you.ll bring|minimum qualifications?)\b/i,
     /\b(responsibilities|what you.ll do|your role|key duties|the role|what you will do|in this role)\b/i,
-    // German
+
     /\b(das bringst du mit|anforderungen|qualifikationen|dein profil|was du mitbringst|voraussetzungen|deine aufgaben)\b/i,
-    // French
+
     /\b(profil recherché|compétences requises|vos missions|ce que nous recherchons)\b/i,
   ];
   for (const marker of markers) {
@@ -85,15 +61,12 @@ function smartTruncate(text, maxChars) {
   return text.substring(0, maxChars);
 }
 
-// ─── SKILL POST-PROCESSING ────────────────────────────────────────────────────
-
 const NON_TECH_CATEGORIES = new Set([
   'Sales', 'Marketing', 'HR', 'Admin', 'Executive', 'Operations',
   'Customer Support', 'Hospitality', 'Retail', 'Project Management',
   'Finance', 'Legal', 'Creative', 'Healthcare', 'Other',
 ]);
 
-// Programming languages + infra that should never appear on non-tech roles
 const TECH_ONLY_LOWER = new Set([
   'python','java','javascript','typescript','golang','go','ruby','rust','scala','kotlin',
   'swift','php','elixir','perl','cobol','dart','lua','bash','powershell','groovy',
@@ -106,10 +79,8 @@ const TECH_ONLY_LOWER = new Set([
   'aws','gcp','azure','s3','ec2','lambda','cloudformation','bigquery','snowflake',
 ]);
 
-// Single/two-char tech names — only valid for Engineering/Data/Security/Research
 const SHORT_TECH_NAMES_LOWER = new Set(['r','go','ml','ai','bi','c#','c++','ts','js']);
 
-// Always strip these from any role — too generic to be useful
 const ALWAYS_STRIP_LOWER = new Set([
   'cloud','software','technology','systems','data','integration','platforms','tools',
   'web','api','saas','erp','it','mobile','digital','internet','hardware',
@@ -172,12 +143,12 @@ RETURN FORMAT (JSON only, no other text):
 ${jobsText}`;
 }
 
-async function callGroq(jobs) {
+async function callAI(jobs) {
   let attempt = 0;
   while (attempt < 3) {
     try {
-      const { data: completion, response } = await groq.chat.completions.create({
-        model:           GROQ_MODEL,
+      const { data: completion, response } = await ai.chat.completions.create({
+        model: AI_MODEL,
         messages:        [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user',   content: buildPrompt(jobs) },
@@ -187,12 +158,10 @@ async function callGroq(jobs) {
         max_tokens:      2048,
       }).withResponse();
 
-      // Check remaining tokens — pause if running low
       const remainingTokens = parseInt(response.headers.get('x-ratelimit-remaining-tokens') || '30000');
       const resetTokensStr  = response.headers.get('x-ratelimit-reset-tokens') || '0s';
       const resetMs         = parseFloat(resetTokensStr) * 1000;
       if (remainingTokens < 4000 && resetMs > 0) {
-        console.log(`  ⏳ Groq tokens low (${remainingTokens} left), waiting ${Math.ceil(resetMs/1000)}s...`);
         await sleep(resetMs + 500);
       }
 
@@ -200,7 +169,6 @@ async function callGroq(jobs) {
       const results = parsed.jobs || parsed.results || parsed.data || [];
       if (!Array.isArray(results)) return [];
 
-      // Normalise field names — model sometimes returns slight variants
       return results.map(r => ({
         job_type:             r.job_type             || null,
         commitment_type:      r.commitment_type      || null,
@@ -224,40 +192,34 @@ async function callGroq(jobs) {
         continue;
       }
       if (err?.status >= 500) {
-        console.log(`  ⚠️  Groq server error (${err.status}), retrying in 5s...`);
         await sleep(5000);
         attempt++;
         continue;
       }
-      // JSON parse error or unexpected structure — return nulls, fall back to rules
-      console.log(`  ⚠️  Groq parse error: ${err.message?.substring(0, 80)}`);
+
       return [];
     }
   }
-  console.log('  ⚠️  Groq failed after 3 attempts — falling back to rule-based for this batch');
   return [];
 }
 
-async function extractAllWithGroq(jobs) {
-  const results = new Map(); // index → groqData
+async function extractAll(jobs) {
+  const results = new Map(); 
 
-  for (let i = 0; i < jobs.length; i += GROQ_BATCH_SIZE) {
-    const batch     = jobs.slice(i, i + GROQ_BATCH_SIZE);
-    const batchEnd  = Math.min(i + GROQ_BATCH_SIZE, jobs.length);
-    process.stdout.write(`  Groq: ${batchEnd}/${jobs.length} jobs...\r`);
+  for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
+    const batch     = jobs.slice(i, i + BATCH_SIZE);
+    const batchEnd  = Math.min(i + BATCH_SIZE, jobs.length);
 
-    const groqResults = await callGroq(batch);
+    const aiResults = await callAI(batch);
 
     for (let j = 0; j < batch.length; j++) {
-      results.set(i + j, groqResults[j] || null);
+      results.set(i + j, aiResults[j] || null);
     }
   }
 
   process.stdout.write('\n');
   return results;
 }
-
-// ─── SKILL NORMALIZER ─────────────────────────────────────────────────────────
 
 function fuzzyKey(name) {
   return name.toLowerCase().replace(/[\s.\-_/]/g, '');
@@ -266,7 +228,6 @@ function fuzzyKey(name) {
 async function normalizeSkills(names, skillsMap) {
   if (!names || names.length === 0) return [];
 
-  // Build a fuzzy-key → skill lookup on first call
   if (!normalizeSkills._fuzzyCache) {
     normalizeSkills._fuzzyCache = new Map();
     for (const [, skill] of skillsMap) {
@@ -282,7 +243,6 @@ async function normalizeSkills(names, skillsMap) {
     const name = rawName.trim();
     if (!name || name.length < 2) continue;
 
-    // 1. Exact slug match
     const slug = makeSlug(name, new Set());
     if (skillsMap.has(slug)) {
       const id = skillsMap.get(slug).id;
@@ -290,7 +250,6 @@ async function normalizeSkills(names, skillsMap) {
       continue;
     }
 
-    // 2. Fuzzy match (normalize punctuation/spaces)
     const fk = fuzzyKey(name);
     if (fuzzyCache.has(fk)) {
       const id = fuzzyCache.get(fk).id;
@@ -298,7 +257,6 @@ async function normalizeSkills(names, skillsMap) {
       continue;
     }
 
-    // 3. Insert as new skill (category null — classify-skills.js will handle it later)
     if (!DRY_RUN) {
       const newSlug = makeUniqueSkillSlug(slug, skillsMap);
       const { data, error } = await main.from('skills').upsert(
@@ -312,7 +270,7 @@ async function normalizeSkills(names, skillsMap) {
         if (!seen.has(data.id)) { seen.add(data.id); ids.push(data.id); }
       }
     } else {
-      // In dry-run just track the name
+
       if (!seen.has(name)) { seen.add(name); ids.push(`[new:${name}]`); }
     }
   }
@@ -327,17 +285,11 @@ function makeUniqueSkillSlug(base, skillsMap) {
   return slug;
 }
 
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
-
 async function run() {
   console.log('══════════════════════════════════════════');
-  console.log('REFINER (Groq) — raw_jobs → Main DB');
-  console.log(`Model: ${GROQ_MODEL}`);
   if (DRY_RUN) console.log('DRY RUN — no writes');
   console.log('══════════════════════════════════════════\n');
 
-  // Load Main DB state
-  console.log('Loading Main DB state...');
   const { data: existingCompanies } = await main.from('companies').select('id, domain, slug');
   const { data: existingLocations } = await main.from('locations').select('id, display_name');
 
@@ -359,28 +311,26 @@ async function run() {
   const slugsUsed       = new Set((existingCompanies || []).map(c => c.slug));
   console.log(`  Companies: ${companyByDomain.size}  Locations: ${locationByName.size}  Skills: ${skillsMap.size}\n`);
 
-  // Pre-mark bulk disqualified jobs in DB2
   if (!DRY_RUN) {
-    const { count: c1 } = await db2.from('raw_jobs')
+    const { count: c1 } = await db.from('raw_jobs')
       .update({ status: 'skipped_no_desc' }, { count: 'exact' })
       .eq('status', 'pending').is('description', null);
-    const { count: c2 } = await db2.from('raw_jobs')
+    const { count: c2 } = await db.from('raw_jobs')
       .update({ status: 'skipped_stale' }, { count: 'exact' })
       .eq('status', 'pending').is('posted_date', null);
-    const { count: c3 } = await db2.from('raw_jobs')
+    const { count: c3 } = await db.from('raw_jobs')
       .update({ status: 'skipped_stale' }, { count: 'exact' })
       .eq('status', 'pending').lt('posted_date', CUTOFF_48H);
     console.log(`Pre-marked: ${c1||0} no_desc  ${(c2||0)+(c3||0)} stale\n`);
   }
 
-  // Fetch jobs — pending normally, promoted when --from-promoted (test mode)
   const fetchStatus = FROM_PROMOTED ? 'promoted' : 'pending';
   if (FROM_PROMOTED) console.log('TEST MODE: reading from promoted jobs (no real pending jobs available)\n');
 
   let rawJobs = [];
   let offset  = 0;
   while (true) {
-    const { data: batch, error } = await db2.from('raw_jobs')
+    const { data: batch, error } = await db.from('raw_jobs')
       .select('*, companies(id, name, slug, domain, logo_url, sources), career_page_configs(ats_provider)')
       .eq('status', fetchStatus)
       .not('description', 'is', null)
@@ -400,14 +350,10 @@ async function run() {
     return;
   }
 
-  // ── Groq batch extraction ──────────────────────────────────────────────────
-  console.log('Running Groq extraction...');
-  const groqResultsMap = await extractAllWithGroq(rawJobs);
-  const groqSuccesses  = [...groqResultsMap.values()].filter(Boolean).length;
-  const groqFallbacks  = rawJobs.length - groqSuccesses;
-  console.log(`  Groq: ${groqSuccesses} extracted  ${groqFallbacks} fallback to rules\n`);
+  const aiResultsMap = await extractAll(rawJobs);
+  const aiSuccesses  = [...aiResultsMap.values()].filter(Boolean).length;
+  const aiFallbacks  = rawJobs.length - aiSuccesses;
 
-  // ── Main promotion loop ────────────────────────────────────────────────────
   const totals = { processed: 0, promoted: 0, skipped: 0, errors: 0, newSkills: 0 };
   const promotedPerCompany = {};
   const toMarkJunk  = [];
@@ -416,11 +362,11 @@ async function run() {
   for (let i = 0; i < rawJobs.length; i++) {
     const job      = rawJobs[i];
     const provider = job.career_page_configs?.ats_provider || 'Unknown';
-    const groqData = groqResultsMap.get(i);
+    const aiData = aiResultsMap.get(i);
 
     try {
-      // Merge Groq output with rule-based fallbacks
-      const extracted = mergeExtraction(groqData, job, provider);
+
+      const extracted = mergeExtraction(aiData, job, provider);
 
       if (!extracted.title) { toMarkJunk.push(job.id); totals.skipped++; continue; }
       if (isJunkJob(extracted.title)) { toMarkJunk.push(job.id); totals.skipped++; continue; }
@@ -430,7 +376,6 @@ async function run() {
 
       if (!extracted.location) { toMarkJunk.push(job.id); totals.skipped++; continue; }
 
-      // Per-company cap
       const rawCompanyId = job.company_id || job.companies?.id;
       if (MAX_PER_COMPANY && rawCompanyId) {
         if ((promotedPerCompany[rawCompanyId] || 0) >= MAX_PER_COMPANY) {
@@ -439,16 +384,12 @@ async function run() {
         }
       }
 
-      // Resolve skills — filter false positives then normalise.
-      // If Groq succeeded (even with empty []), trust its extraction — don't fall back.
-      // Only fall back to rule-based when Groq completely failed (groqData is null).
-      const rawSkillNames = groqData !== null
-        ? (groqData.skills || [])
+      const rawSkillNames = aiData !== null
+        ? (aiData.skills || [])
         : extractSkillNamesFallback(job.description || '', skillsMap);
       const filteredSkillNames = filterSkillsByCategory(rawSkillNames, extracted.category);
       const skillIds = await normalizeSkills(filteredSkillNames, skillsMap);
 
-      // Resolve company + location
       const companyId  = await resolveCompany(job.companies, companyByDomain, slugsUsed);
       if (!companyId) { totals.skipped++; continue; }
       const locationId = await resolveLocation(extracted.location, locationByName, extracted.location_country_hint);
@@ -498,12 +439,12 @@ async function run() {
           }
         }
 
-        await db2.from('raw_jobs').update({
+        await db.from('raw_jobs').update({
           status: 'promoted', is_promoted: true, promoted_at: new Date().toISOString()
         }).eq('id', job.id);
 
       } else {
-        // Dry-run: print structured output
+
         const newSkillsList = skillIds.filter(id => typeof id === 'string' && id.startsWith('[new:'));
         const realSkillIds  = skillIds.filter(id => !String(id).startsWith('[new:'));
         const skillNames_   = [
@@ -513,14 +454,12 @@ async function run() {
 
         const stripped = rawSkillNames.filter(s => !filteredSkillNames.includes(s));
         console.log(`\n[${i+1}/${rawJobs.length}] ${provider.padEnd(14)} | ${extracted.title}`);
-        console.log(`  job_type:     ${extracted.job_type        || 'null'}  ${groqData ? '(groq)' : '(rules)'}`);
         console.log(`  commitment:   ${extracted.commitment_type || 'null'}`);
         console.log(`  experience:   ${extracted.experience_level || 'null'}`);
         console.log(`  category:     ${extracted.category        || 'null'}`);
         console.log(`  location:     ${extracted.location}`);
         console.log(`  salary:       ${extracted.salary_min ? `$${extracted.salary_min}-$${extracted.salary_max}` : 'null'}`);
         if (stripped.length) {
-          console.log(`  groq skills:  (${rawSkillNames.length}) ${rawSkillNames.join(', ')}`);
           console.log(`  filtered out: ${stripped.join(', ')}`);
         }
         console.log(`  skills (${skillNames_.length}):  ${skillNames_.join(', ') || 'none'}  (* = new)`);
@@ -542,12 +481,11 @@ async function run() {
     }
   }
 
-  // Bulk-mark skipped jobs
   if (!DRY_RUN) {
     const CHUNK = 500;
     const bulkMark = async (ids, status) => {
       for (let i = 0; i < ids.length; i += CHUNK) {
-        await db2.from('raw_jobs').update({ status }).in('id', ids.slice(i, i + CHUNK));
+        await db.from('raw_jobs').update({ status }).in('id', ids.slice(i, i + CHUNK));
       }
     };
     if (toMarkJunk.length)  await bulkMark(toMarkJunk,  'skipped_junk');
@@ -562,23 +500,18 @@ async function run() {
   console.log(`  → junk:       ${toMarkJunk.length}`);
   console.log(`  → cap:        ${totals.skipped - toMarkStale.length - toMarkJunk.length}`);
   console.log(`Errors:         ${totals.errors}`);
-  console.log(`Groq fallbacks: ${groqFallbacks}`);
 
   if (!DRY_RUN) {
     const { count } = await main.from('jobs').select('*', { count: 'exact', head: true });
-    console.log(`\nMain DB jobs total: ${count}`);
   }
 }
 
-// ─── MERGE GROQ + RULE-BASED FALLBACK ─────────────────────────────────────────
+function mergeExtraction(aiData, job, provider) {
 
-function mergeExtraction(groqData, job, provider) {
-  // Start with rule-based (always runs as base)
   const rules = extractFields(job, provider);
 
-  if (!groqData) return rules;
+  if (!aiData) return rules;
 
-  // Groq wins on every field it returns a non-null value for
   const VALID_JOB_TYPES    = new Set(['remote','hybrid','onsite']);
   const VALID_COMMITMENT   = new Set(['full_time','part_time','contract','internship']);
   const VALID_EXPERIENCE   = new Set(['entry','mid','senior','lead','executive']);
@@ -586,23 +519,21 @@ function mergeExtraction(groqData, job, provider) {
 
   return {
     title:                rules.title,
-    job_type:             (VALID_JOB_TYPES.has(groqData.job_type))   ? groqData.job_type   : rules.job_type,
-    commitment_type:      (VALID_COMMITMENT.has(groqData.commitment_type)) ? groqData.commitment_type : rules.commitment_type,
-    experience_level:     (VALID_EXPERIENCE.has(groqData.experience_level)) ? groqData.experience_level : rules.experience_level,
-    category:             (VALID_CATEGORIES.has(groqData.category))  ? groqData.category   : rules.category,
-    location:             rules.location,  // always from ATS raw_data, not description text
-    location_country_hint: groqData.location_country || null,  // fills gaps parseLocation can't resolve
+    job_type:             (VALID_JOB_TYPES.has(aiData.job_type))   ? aiData.job_type   : rules.job_type,
+    commitment_type:      (VALID_COMMITMENT.has(aiData.commitment_type)) ? aiData.commitment_type : rules.commitment_type,
+    experience_level:     (VALID_EXPERIENCE.has(aiData.experience_level)) ? aiData.experience_level : rules.experience_level,
+    category:             (VALID_CATEGORIES.has(aiData.category))  ? aiData.category   : rules.category,
+    location:             rules.location,  
+    location_country_hint: aiData.location_country || null,  
     salary_min:           rules.salary_min,
     salary_max:           rules.salary_max,
     salary_currency:      rules.salary_currency,
     salary_period:        rules.salary_period,
-    requirements_summary: groqData.requirements_summary || null,
-    responsibilities:     groqData.responsibilities     || null,
-    min_years_exp:        groqData.min_years_exp        ?? null,
+    requirements_summary: aiData.requirements_summary || null,
+    responsibilities:     aiData.responsibilities     || null,
+    min_years_exp:        aiData.min_years_exp        ?? null,
   };
 }
-
-// ─── RULE-BASED FALLBACK FUNCTIONS (unchanged from refiner.js) ────────────────
 
 function extractSkillNamesFallback(text, skillsMap) {
   if (!text || skillsMap.size === 0) return [];
@@ -809,13 +740,11 @@ function currencyFromSymbol(sym) {
   return 'USD';
 }
 
-// ─── RESOLVE COMPANY ──────────────────────────────────────────────────────────
-
-async function resolveCompany(db2Company, companyByDomain, slugsUsed) {
+async function resolveCompany(dbCompany, companyByDomain, slugsUsed) {
   if (!db2Company) return null;
-  let domain = db2Company.domain;
+  let domain = dbCompany.domain;
   if (!domain || domain.length < 4 || !domain.includes('.')) {
-    domain = db2Company.slug || makeSlug(db2Company.name, new Set());
+    domain = dbCompany.slug || makeSlug(dbCompany.name, new Set());
   }
   if (companyByDomain.has(domain)) return companyByDomain.get(domain).id;
 
@@ -825,15 +754,15 @@ async function resolveCompany(db2Company, companyByDomain, slugsUsed) {
       .select('linkedin_url, year_founded, number_employees, industries, funding_stage, is_public, headquarters, headquarters_country, description')
       .ilike('website', '%' + domain + '%').limit(1);
     if (db1Companies?.[0]) enrichment = db1Companies[0];
-  } catch { /* enrichment optional */ }
+  } catch {  }
 
-  const slug = makeSlug(db2Company.name, slugsUsed);
+  const slug = makeSlug(dbCompany.name, slugsUsed);
   slugsUsed.add(slug);
 
   if (!DRY_RUN) {
     const { data: inserted, error } = await main.from('companies').insert({
-      name: db2Company.name, slug, domain,
-      logo_url:             db2Company.logo_url || null,
+      name: dbCompany.name, slug, domain,
+      logo_url:             dbCompany.logo_url || null,
       linkedin_url:         enrichment.linkedin_url || null,
       year_founded:         enrichment.year_founded || null,
       employee_count:       enrichment.number_employees || null,
@@ -843,7 +772,7 @@ async function resolveCompany(db2Company, companyByDomain, slugsUsed) {
       headquarters:         enrichment.headquarters || null,
       headquarters_country: enrichment.headquarters_country || null,
       description:          enrichment.description || null,
-      sources:              db2Company.sources || [],
+      sources:              dbCompany.sources || [],
     }).select('id').single();
 
     if (error) {
@@ -858,8 +787,6 @@ async function resolveCompany(db2Company, companyByDomain, slugsUsed) {
   }
   return 'dry-run-company-id';
 }
-
-// ─── RESOLVE LOCATION ─────────────────────────────────────────────────────────
 
 async function resolveLocation(locationRaw, locationByName, countryHint = null) {
   if (!locationRaw) return null;
@@ -914,7 +841,7 @@ function preProcessLocation(raw) {
 }
 
 function extractRemoteCountry(t, hint) {
-  // Global/regional signals → no single country
+
   if (/\b(world.?wide|worldwide|global|international|anywhere|latin america|americas|europe|apac|emea|latam|mena|nordics?)\b/.test(t)) {
     return hint || null;
   }
@@ -922,7 +849,6 @@ function extractRemoteCountry(t, hint) {
   const REMOTE_CC = new Set(['us','uk','gb','de','fr','ca','au','in','nl','sg','jp','br','mx','pl','es','it','se','no','dk','fi','ch','be','at','pt','ie','nz','za','ae','tr','il','kr','hk','tw','ua','ph','pk','ng','ke','gh','ro','cz','gr','ar','cl','co','pe','id','my','th','vn','eg','ma','rw','uz','bd','lk','mn','np','ir','sa','jo','lb','qa','kw','bh','om','tz','ug','zm','zw']);
   const REMOTE_NAMES = {'united states':'US','united states of america':'US','usa':'US','u.s.':'US','united kingdom':'GB','great britain':'GB','england':'GB','scotland':'GB','wales':'GB','germany':'DE','france':'FR','canada':'CA','australia':'AU','india':'IN','brazil':'BR','mexico':'MX','spain':'ES','italy':'IT','netherlands':'NL','holland':'NL','singapore':'SG','poland':'PL','sweden':'SE','portugal':'PT','switzerland':'CH','belgium':'BE','austria':'AT','ireland':'IE','denmark':'DK','norway':'NO','finland':'FI','israel':'IL','turkey':'TR','south korea':'KR','korea':'KR','hong kong':'HK','taiwan':'TW','new zealand':'NZ','south africa':'ZA','ukraine':'UA','pakistan':'PK','philippines':'PH','nigeria':'NG','kenya':'KE','ghana':'GH','romania':'RO','czech republic':'CZ','czechia':'CZ','greece':'GR','argentina':'AR','chile':'CL','colombia':'CO','peru':'PE','indonesia':'ID','malaysia':'MY','thailand':'TH','vietnam':'VN','egypt':'EG','morocco':'MA','saudi arabia':'SA','united arab emirates':'AE','uae':'AE'};
 
-  // Strip "remote" + noise words, leaving just location context
   let s = t
     .replace(/\bremote\b/g, '')
     .replace(/\b(opportunity|position|job|work|only|within|based|employees can work remotely|exclusively|first)\b/g, '')
@@ -930,19 +856,16 @@ function extractRemoteCountry(t, hint) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Full country name match (longest first to avoid partial hits)
   const namesSorted = Object.keys(REMOTE_NAMES).sort((a, b) => b.length - a.length);
   for (const name of namesSorted) {
     if (s.includes(name)) return REMOTE_NAMES[name];
   }
 
-  // 2-letter code match — each word individually
   for (const word of s.split(/\s+/)) {
     const w = word.replace(/[^a-z]/g, '');
     if (w.length === 2 && REMOTE_CC.has(w)) return w === 'uk' ? 'GB' : w.toUpperCase();
   }
 
-  // Fall back to Groq hint
   return (hint && hint.length === 2) ? hint.toUpperCase() : null;
 }
 
@@ -951,12 +874,11 @@ function parseLocation(raw, countryHint = null) {
   const t = raw.toLowerCase().trim();
 
   if (/\bremote\b/.test(t)) {
-    // Location = WHERE (country only), Remote badge handled separately by job_type
+
     const country = extractRemoteCountry(t, countryHint);
     const CODE_TO_FULL_R = {'US':'United States','GB':'United Kingdom','DE':'Germany','FR':'France','CA':'Canada','AU':'Australia','IN':'India','BR':'Brazil','MX':'Mexico','ES':'Spain','IT':'Italy','NL':'Netherlands','SG':'Singapore','PL':'Poland','SE':'Sweden','PT':'Portugal','CH':'Switzerland','BE':'Belgium','AT':'Austria','IE':'Ireland','DK':'Denmark','NO':'Norway','FI':'Finland','NZ':'New Zealand','ZA':'South Africa','AE':'UAE','TR':'Turkey','IL':'Israel','KR':'South Korea','HK':'Hong Kong','TW':'Taiwan','UA':'Ukraine','MT':'Malta','PH':'Philippines','PK':'Pakistan','NG':'Nigeria','KE':'Kenya','GH':'Ghana','RO':'Romania','CZ':'Czech Republic','GR':'Greece','AR':'Argentina','CL':'Chile','CO':'Colombia','PE':'Peru','ID':'Indonesia','MY':'Malaysia','TH':'Thailand','VN':'Vietnam','EG':'Egypt','MA':'Morocco'};
     const fullCountry = country ? (CODE_TO_FULL_R[country] || country) : null;
-    // display_name = country name only (e.g. "United States", "Germany")
-    // "Worldwide" when no country can be determined
+
     const display = fullCountry || 'Worldwide';
     return { city: null, state: null, country: country || null, display_name: display, is_remote: true };
   }
@@ -1023,10 +945,6 @@ function parseLocation(raw, countryHint = null) {
 
   if (state && !country) country = 'US';
 
-  // Groq country hint — three cases where we trust it over the rule-based result:
-  // 1. country is null ("Munich", "Chicago", "Cape Town")
-  // 2. state is set but hint disagrees — "Québec City, ca" parsed as CA/US but is Canada
-  // 3. rule-based produced garbage (multi-word non-code string like "D.C. or DMV Area")
   if (countryHint && countryHint.length === 2) {
     if (!country) {
       country = countryHint;
@@ -1035,7 +953,7 @@ function parseLocation(raw, countryHint = null) {
       country = countryHint;
       state   = null;
     } else if (country.length > 2 && !/^[A-Z]{2}$/.test(country)) {
-      // Garbage country string from rule-based — trust Groq
+
       country = countryHint;
       state   = null;
     }
@@ -1050,8 +968,6 @@ function parseLocation(raw, countryHint = null) {
 
   return { city, state: state||null, country: country||null, country_code: countryCode?.toUpperCase()||null, display_name: display||cleaned, is_remote: false };
 }
-
-// ─── SLUG HELPERS ─────────────────────────────────────────────────────────────
 
 function makeSlug(text, usedSlugs) {
   let base = text.toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').substring(0, 60).replace(/^-|-$/g, '');
