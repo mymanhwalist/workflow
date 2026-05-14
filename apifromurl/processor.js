@@ -27,7 +27,7 @@ const SKIP_FRESHNESS  = process.argv.includes('--skip-freshness');
 const db  = createClient(DB2_URL,  DB2_KEY);
 const main = createClient(MAIN_URL, MAIN_KEY);
 const db1  = createClient(DB1_URL,  DB1_KEY);
-const ai = new AI({ apiKey: AI_KEY });
+const ai = new AI({ apiKey: GROQ_API_KEY });
 
 const SYSTEM_PROMPT = `You are a job posting data extractor. Return ONLY a valid JSON object. No explanation, no markdown, no extra text.`;
 
@@ -148,7 +148,7 @@ async function callAI(jobs) {
   while (attempt < 3) {
     try {
       const { data: completion, response } = await ai.chat.completions.create({
-        model: AI_MODEL,
+        model:           GROQ_MODEL,
         messages:        [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user',   content: buildPrompt(jobs) },
@@ -162,6 +162,7 @@ async function callAI(jobs) {
       const resetTokensStr  = response.headers.get('x-ratelimit-reset-tokens') || '0s';
       const resetMs         = parseFloat(resetTokensStr) * 1000;
       if (remainingTokens < 4000 && resetMs > 0) {
+        console.log(`  ⏳ Groq tokens low (${remainingTokens} left), waiting ${Math.ceil(resetMs/1000)}s...`);
         await sleep(resetMs + 500);
       }
 
@@ -192,14 +193,17 @@ async function callAI(jobs) {
         continue;
       }
       if (err?.status >= 500) {
+        console.log(`  ⚠️  Groq server error (${err.status}), retrying in 5s...`);
         await sleep(5000);
         attempt++;
         continue;
       }
 
+      console.log(`  ⚠️  Groq parse error: ${err.message?.substring(0, 80)}`);
       return [];
     }
   }
+  console.log('  ⚠️  Groq failed after 3 attempts — falling back to rule-based for this batch');
   return [];
 }
 
@@ -209,6 +213,7 @@ async function extractAll(jobs) {
   for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
     const batch     = jobs.slice(i, i + BATCH_SIZE);
     const batchEnd  = Math.min(i + BATCH_SIZE, jobs.length);
+    process.stdout.write(`  Groq: ${batchEnd}/${jobs.length} jobs...\r`);
 
     const aiResults = await callAI(batch);
 
@@ -287,9 +292,12 @@ function makeUniqueSkillSlug(base, skillsMap) {
 
 async function run() {
   console.log('══════════════════════════════════════════');
+  console.log('REFINER (Groq) — raw_jobs → Main DB');
+  console.log(`Model: ${GROQ_MODEL}`);
   if (DRY_RUN) console.log('DRY RUN — no writes');
   console.log('══════════════════════════════════════════\n');
 
+  console.log('Loading Main DB state...');
   const { data: existingCompanies } = await main.from('companies').select('id, domain, slug');
   const { data: existingLocations } = await main.from('locations').select('id, display_name');
 
@@ -350,9 +358,11 @@ async function run() {
     return;
   }
 
+  console.log('Running Groq extraction...');
   const aiResultsMap = await extractAll(rawJobs);
   const aiSuccesses  = [...aiResultsMap.values()].filter(Boolean).length;
   const aiFallbacks  = rawJobs.length - aiSuccesses;
+  console.log(`  Groq: ${aiSuccesses} extracted  ${aiFallbacks} fallback to rules\n`);
 
   const totals = { processed: 0, promoted: 0, skipped: 0, errors: 0, newSkills: 0 };
   const promotedPerCompany = {};
@@ -422,6 +432,7 @@ async function run() {
           raw_job_id:           job.id,
           ats_provider:         provider,
           external_id:          job.external_id || null,
+          is_published:         false,
         }).select('id').single();
 
         if (insertErr) {
@@ -454,12 +465,14 @@ async function run() {
 
         const stripped = rawSkillNames.filter(s => !filteredSkillNames.includes(s));
         console.log(`\n[${i+1}/${rawJobs.length}] ${provider.padEnd(14)} | ${extracted.title}`);
+        console.log(`  job_type:     ${extracted.job_type        || 'null'}  ${aiData ? '(groq)' : '(rules)'}`);
         console.log(`  commitment:   ${extracted.commitment_type || 'null'}`);
         console.log(`  experience:   ${extracted.experience_level || 'null'}`);
         console.log(`  category:     ${extracted.category        || 'null'}`);
         console.log(`  location:     ${extracted.location}`);
         console.log(`  salary:       ${extracted.salary_min ? `$${extracted.salary_min}-$${extracted.salary_max}` : 'null'}`);
         if (stripped.length) {
+          console.log(`  groq skills:  (${rawSkillNames.length}) ${rawSkillNames.join(', ')}`);
           console.log(`  filtered out: ${stripped.join(', ')}`);
         }
         console.log(`  skills (${skillNames_.length}):  ${skillNames_.join(', ') || 'none'}  (* = new)`);
@@ -500,9 +513,11 @@ async function run() {
   console.log(`  → junk:       ${toMarkJunk.length}`);
   console.log(`  → cap:        ${totals.skipped - toMarkStale.length - toMarkJunk.length}`);
   console.log(`Errors:         ${totals.errors}`);
+  console.log(`Groq fallbacks: ${aiFallbacks}`);
 
   if (!DRY_RUN) {
     const { count } = await main.from('jobs').select('*', { count: 'exact', head: true });
+    console.log(`\nMain DB jobs total: ${count}`);
   }
 }
 
@@ -740,11 +755,11 @@ function currencyFromSymbol(sym) {
   return 'USD';
 }
 
-async function resolveCompany(dbCompany, companyByDomain, slugsUsed) {
+async function resolveCompany(db2Company, companyByDomain, slugsUsed) {
   if (!db2Company) return null;
-  let domain = dbCompany.domain;
+  let domain = db2Company.domain;
   if (!domain || domain.length < 4 || !domain.includes('.')) {
-    domain = dbCompany.slug || makeSlug(dbCompany.name, new Set());
+    domain = db2Company.slug || makeSlug(db2Company.name, new Set());
   }
   if (companyByDomain.has(domain)) return companyByDomain.get(domain).id;
 
@@ -756,13 +771,13 @@ async function resolveCompany(dbCompany, companyByDomain, slugsUsed) {
     if (db1Companies?.[0]) enrichment = db1Companies[0];
   } catch {  }
 
-  const slug = makeSlug(dbCompany.name, slugsUsed);
+  const slug = makeSlug(db2Company.name, slugsUsed);
   slugsUsed.add(slug);
 
   if (!DRY_RUN) {
     const { data: inserted, error } = await main.from('companies').insert({
-      name: dbCompany.name, slug, domain,
-      logo_url:             dbCompany.logo_url || null,
+      name: db2Company.name, slug, domain,
+      logo_url:             db2Company.logo_url || null,
       linkedin_url:         enrichment.linkedin_url || null,
       year_founded:         enrichment.year_founded || null,
       employee_count:       enrichment.number_employees || null,
@@ -772,7 +787,7 @@ async function resolveCompany(dbCompany, companyByDomain, slugsUsed) {
       headquarters:         enrichment.headquarters || null,
       headquarters_country: enrichment.headquarters_country || null,
       description:          enrichment.description || null,
-      sources:              dbCompany.sources || [],
+      sources:              db2Company.sources || [],
     }).select('id').single();
 
     if (error) {

@@ -1,22 +1,18 @@
-name: process
+name: publish
 
 on:
   schedule:
-    - cron: '30 0 * * *'
-    - cron: '30 5 * * *'
-    - cron: '30 10 * * *'
-    - cron: '30 15 * * *'
-    - cron: '30 20 * * *'
+    - cron: '0 1 * * *'
+    - cron: '0 6 * * *'
+    - cron: '0 11 * * *'
+    - cron: '0 16 * * *'
+    - cron: '0 21 * * *'
   workflow_dispatch:
     inputs:
-      max_per_company:
-        description: 'Max jobs per source'
-        required: false
-        default: '3'
       limit:
-        description: 'Max total jobs per run'
+        description: 'Max jobs per run'
         required: false
-        default: '100'
+        default: '6'
       dry_run:
         description: 'Dry run'
         required: false
@@ -26,7 +22,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -44,20 +40,13 @@ jobs:
       - name: Run
         working-directory: apifromurl
         env:
-          DB2_URL: ${{ secrets.DB2_URL }}
-          DB2_KEY: ${{ secrets.DB2_KEY }}
           MAIN_DB_URL: ${{ secrets.MAIN_DB_URL }}
           MAIN_DB_KEY: ${{ secrets.MAIN_DB_KEY }}
-          DB1_URL: ${{ secrets.DB1_URL }}
-          DB1_KEY: ${{ secrets.DB1_KEY }}
-          AI_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
-          MAX_CO="${{ github.event.inputs.max_per_company }}"
-          if [ -z "$MAX_CO" ]; then MAX_CO="3"; fi
           LIMIT="${{ github.event.inputs.limit }}"
           if [ -z "$LIMIT" ]; then LIMIT="6"; fi
-          ARGS="--max-per-company=$MAX_CO --limit=$LIMIT"
+          ARGS="--limit=$LIMIT"
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
-          node processor.js $ARGS
+          node publisher.js $ARGS
