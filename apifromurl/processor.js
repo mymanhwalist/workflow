@@ -293,7 +293,7 @@ function makeUniqueSkillSlug(base, skillsMap) {
 async function run() {
   console.log('══════════════════════════════════════════');
   console.log('REFINER (Groq) — raw_jobs → Main DB');
-  console.log(`Model: ${GROQ_MODEL}`);
+  console.log(`Model: ${AI_MODEL}`);
   if (DRY_RUN) console.log('DRY RUN — no writes');
   console.log('══════════════════════════════════════════\n');
 
