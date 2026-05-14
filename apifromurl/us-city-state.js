@@ -1,5 +1,3 @@
-// Auto-generated from DB1 hiring.cafe data — 3643 US cities
-// city_name_lowercase -> state_code
 export const US_CITY_STATE = {
   ".": "MS",
   "abbeville": "AL",
