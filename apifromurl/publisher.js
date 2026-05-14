@@ -3,9 +3,9 @@ import { createClient } from '@supabase/supabase-js';
 const MAIN_URL = process.env.MAIN_DB_URL;
 const MAIN_KEY = process.env.MAIN_DB_KEY;
 
-const DRY_RUN  = process.argv.includes('--dry-run');
-const limitArg = process.argv.find(a => a.startsWith('--limit='));
-const LIMIT    = limitArg ? parseInt(limitArg.split('=')[1]) : 6;
+const DRY_RUN   = process.argv.includes('--dry-run');
+const limitArg  = process.argv.find(a => a.startsWith('--limit='));
+const LIMIT     = limitArg ? parseInt(limitArg.split('=')[1]) : 6;
 
 const db = createClient(MAIN_URL, MAIN_KEY);
 
@@ -21,6 +21,7 @@ async function main() {
   if (error) { console.error('Fetch failed:', error.message); process.exit(1); }
   if (!unpublished?.length) { console.log('No unpublished jobs.'); return; }
 
+  // Pick 1 per category first (category coverage)
   const seen = new Set();
   const picked = [];
 
@@ -31,13 +32,14 @@ async function main() {
     }
   }
 
+  // Fill remaining slots from any category
   for (const job of unpublished) {
     if (picked.length >= LIMIT) break;
     if (!picked.find(p => p.id === job.id)) picked.push(job);
   }
 
   console.log(`Publishing ${picked.length} jobs:`);
-  picked.forEach(j => console.log(`  [${j.category}] ${j.title}`));
+  picked.forEach(j => console.log(`  [${j.category}] ${j.title} — ${j.companies?.name}`));
 
   if (!DRY_RUN) {
     const { error: updateErr } = await db
