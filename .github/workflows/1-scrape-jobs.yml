@@ -1,0 +1,98 @@
+name: 1 — Scrape Jobs
+
+# Scrapes companies with reliable posting dates (Greenhouse, Lever, Ashby, Workable, Eightfold)
+# stalest first, until 15 companies contribute new jobs. Runs every 6 hours.
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+    - cron: '0 5 * * *'
+    - cron: '0 10 * * *'
+    - cron: '0 15 * * *'
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Max endpoints to scrape this run (default: 1000)'
+        required: false
+        default: '1000'
+      max_pending_per_company:
+        description: 'Max new pending jobs saved per company (default: 3)'
+        required: false
+        default: '3'
+      provider:
+        description: 'Scrape specific ATS provider only (e.g. Greenhouse, Lever, Ashby)'
+        required: false
+        default: ''
+      all_providers:
+        description: 'Include all providers, not just ones with reliable dates'
+        required: false
+        default: 'false'
+        type: boolean
+      force:
+        description: 'Force re-scrape (ignore 6h cooldown)'
+        required: false
+        default: 'false'
+        type: boolean
+      dry_run:
+        description: 'Dry run — print only, no DB writes'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  scrape:
+    name: Scrape target companies → DB2 raw_jobs
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: apifromurl/package-lock.json
+
+      - name: Install dependencies
+        working-directory: apifromurl
+        run: npm ci
+
+      - name: Run scraper
+        working-directory: apifromurl
+        env:
+          DB2_URL: ${{ secrets.DB2_URL }}
+          DB2_KEY: ${{ secrets.DB2_KEY }}
+        run: |
+          LIMIT="${{ github.event.inputs.limit }}"
+          if [ -z "$LIMIT" ]; then LIMIT="1000"; fi
+
+          MAX_PER="${{ github.event.inputs.max_pending_per_company }}"
+          if [ -z "$MAX_PER" ]; then MAX_PER="3"; fi
+
+          ARGS="--limit=$LIMIT --max-pending-per-company=$MAX_PER"
+
+          # Default: only scrape providers with reliable posting dates
+          if [ "${{ github.event.inputs.all_providers }}" != "true" ]; then
+            ARGS="$ARGS --reliable-dates-only"
+          fi
+
+          if [ -n "${{ github.event.inputs.provider }}" ]; then
+            ARGS="$ARGS --provider=${{ github.event.inputs.provider }}"
+          fi
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            ARGS="$ARGS --force"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+
+          echo "Running: node scraper.js $ARGS"
+          node scraper.js $ARGS
+
+      - name: Summary
+        if: always()
+        run: echo "✅ Scrape finished at $(date -u)"

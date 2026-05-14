@@ -1,0 +1,31 @@
+{
+  "name": "job-api-scraper",
+  "version": "1.0.0",
+  "description": "Find API endpoints from job application URLs and scrape jobs",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node scheduler.js --once",
+    "continuous": "node scheduler.js --continuous",
+    "find-apis": "node check-all-urls.js --test-api --update",
+    "find-apis:dry": "node check-all-urls.js --test-api",
+    "find-sitemaps": "node sitemap-finder.js --update --verbose",
+    "find-sitemaps:dry": "node sitemap-finder.js --verbose",
+    "scrape": "node job-scraper.js",
+    "scrape:dry": "node job-scraper.js --dry-run",
+    "scrape:3days": "node job-scraper.js --days=3",
+    "scrape:today": "node job-scraper.js --days=1",
+    "scrape:all": "node job-scraper.js --all",
+    "scrape:sitemap": "node job-scraper.js --sitemap",
+    "scrape:sitemap:dry": "node job-scraper.js --sitemap --dry-run",
+    "scrape:details": "node scrape-job-details.js --input=sitemap-test-2026-02-07.json",
+    "scrape:details:sample": "node scrape-job-details.js --input=sitemap-test-2026-02-07.json --sample=5",
+    "verify": "node verify-apis.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "cheerio": "^1.2.0",
+    "groq-sdk": "^1.1.2"
+  }
+}
