@@ -16,7 +16,7 @@ on:
       limit:
         description: 'Max total jobs per run'
         required: false
-        default: '100'
+        default: '60'
       dry_run:
         description: 'Dry run'
         required: false
