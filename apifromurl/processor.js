@@ -10,7 +10,7 @@ const DB1_URL      = process.env.DB1_URL     ;
 const DB1_KEY      = process.env.DB1_KEY     ;
 const AI_KEY = process.env.AI_KEY;
 
-const AI_MODEL = process.env.AI_MODEL || 'default';
+const AI_MODEL = process.env.AI_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
 const BATCH_SIZE = 10;
 const DESC_TRUNCATE   = 1500;  
 const FETCH_BATCH     = 200;
@@ -27,7 +27,7 @@ const SKIP_FRESHNESS  = process.argv.includes('--skip-freshness');
 const db  = createClient(DB2_URL,  DB2_KEY);
 const main = createClient(MAIN_URL, MAIN_KEY);
 const db1  = createClient(DB1_URL,  DB1_KEY);
-const ai = new AI({ apiKey: GROQ_API_KEY });
+const ai = new AI({ apiKey: AI_KEY });
 
 const SYSTEM_PROMPT = `You are a job posting data extractor. Return ONLY a valid JSON object. No explanation, no markdown, no extra text.`;
 
@@ -148,7 +148,7 @@ async function callAI(jobs) {
   while (attempt < 3) {
     try {
       const { data: completion, response } = await ai.chat.completions.create({
-        model:           GROQ_MODEL,
+        model:           AI_MODEL,
         messages:        [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user',   content: buildPrompt(jobs) },
@@ -1001,3 +1001,4 @@ function makeJobSlug(title, company, usedSlugs) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 run().catch(console.error);
+
