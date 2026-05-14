@@ -3,9 +3,10 @@ import { createClient } from '@supabase/supabase-js';
 const DB2_URL = process.env.DB2_URL;
 const DB2_KEY = process.env.DB2_KEY;
 
-const SCRAPE_COOLDOWN_HOURS = 6;     
-const MAX_FAILURES           = 3;    
-const REQUEST_DELAY_MS       = 300;  
+const SCRAPE_COOLDOWN_HOURS = 6;
+const MAX_FAILURES           = 3;
+const REQUEST_DELAY_MS       = 300;
+const WALL_LIMIT_MS          = 90 * 60 * 1000;
 
 const DRY_RUN      = process.argv.includes('--dry-run');
 const FORCE        = process.argv.includes('--force');
@@ -82,8 +83,15 @@ async function main() {
   ]);
 
   const totals = { configs: 0, jobs_found: 0, jobs_new: 0, jobs_updated: 0, errors: 0 };
+  const startTime = Date.now();
 
   for (let i = 0; i < toScrape.length; i++) {
+    if (Date.now() - startTime > WALL_LIMIT_MS) {
+      console.log(`\n⏱ 90-minute wall limit reached after ${totals.configs} configs — stopping gracefully.`);
+      console.log(`  Next run will continue from oldest-unscraped configs.`);
+      break;
+    }
+
     const config = toScrape[i];
     const isFirstScrape = !scrapedCompanies.has(config.company_id);
     console.log(`[${i + 1}/${toScrape.length}] ${config.ats_provider || 'API'} | ${config.api_endpoint.substring(0, 60)}`);
