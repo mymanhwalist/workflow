@@ -55,7 +55,7 @@ jobs:
           MAX_CO="${{ github.event.inputs.max_per_company }}"
           if [ -z "$MAX_CO" ]; then MAX_CO="3"; fi
           LIMIT="${{ github.event.inputs.limit }}"
-          if [ -z "$LIMIT" ]; then LIMIT="6"; fi
+          if [ -z "$LIMIT" ]; then LIMIT="60"; fi
           ARGS="--max-per-company=$MAX_CO --limit=$LIMIT"
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
